@@ -94,9 +94,26 @@ services:
     command: ["gateway", "run"]
     security_opt:
       - no-new-privileges:true
-    # Drop all Linux capabilities; the agent doesn't need any to talk outbound.
+    # The Hermes image is s6-overlay based: PID 1 starts as root and drops to the
+    # hermes service user (uid 10000) via s6-applyuidgid. That drop needs a few Linux
+    # capabilities. A blanket `cap_drop: ALL` makes it fail with
+    #   s6-applyuidgid: fatal: unable to set supplementary group list: Operation not permitted
+    # and the container CRASH-LOOPS before the agent ever starts (Telegram never
+    # connects, the bot is silent). So drop ALL, then add back ONLY the minimal set
+    # s6-overlay needs to initialise and switch user:
+    #   SETUID/SETGID            - s6-applyuidgid: root -> uid 10000 (setgroups/setgid/setuid)
+    #   CHOWN/FOWNER/DAC_OVERRIDE - cont-init chowns the /run/s6 supervise trees + /opt/data
+    #   KILL                     - s6 supervisor signals its services
+    # The agent itself needs no caps to talk outbound; this set is purely for init.
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - KILL
     # Sane resource limits for a $5-$20 VM. Tune per client plan.
     deploy:
       resources:
