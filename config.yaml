@@ -1,0 +1,63 @@
+# Hermes Agent config for a single-tenant per-client VM, wired to avots.ai.
+# This file is pre-seeded into the mounted data dir (./data/config.yaml -> /opt/data/config.yaml)
+# at provision time so the interactive `hermes setup` wizard is NOT needed (headless).
+#
+# Secrets live in .env (same data dir). Non-secret settings live here. Env vars are
+# expanded with the ${VAR} syntax (bare $VAR is NOT expanded). Precedence is roughly:
+#   CLI args  >  config.yaml  >  .env  >  built-in defaults.
+#
+# avots backend (validated 2026-06-05):
+#   base_url:  https://api.avots.ai/openai/v1   (must end at /v1)
+#   auth:      Authorization: Bearer av_mcp_<key>   (AVOTS_API_KEY in .env)
+#   model:     anthropic/claude-opus-4.8           (lazy alias "claude" also works)
+#
+# Keys confirmed against upstream cli-config.yaml.example (NousResearch/hermes-agent):
+#   model.provider == "custom" selects "any OpenAI-compatible endpoint; set base_url".
+#   model.default (alias: model.model) is the default model id.
+#   model.base_url is the endpoint base.
+#   model.api_key may be set here OR referenced from env; we keep the secret in .env.
+#   model.context_length is the TOTAL context window; normally auto-detected — we set
+#     it explicitly as a safety net in case avots' /v1/models doesn't advertise it.
+
+model:
+  # "custom" = any OpenAI-compatible endpoint (aliases ollama/vllm/llamacpp also map here).
+  provider: "custom"
+
+  # Default model id served by avots. Both "default" and "model" are accepted keys;
+  # we use "default" (the canonical one in the upstream example).
+  default: "anthropic/claude-opus-4.8"
+
+  # avots OpenAI-compatible base. MUST end at /v1.
+  base_url: "https://api.avots.ai/openai/v1"
+
+  # Secret stays in .env. Referenced here via ${VAR}. Hermes also falls back to
+  # OPENAI_API_KEY for custom endpoints, which .env sets to the same avots key.
+  api_key: "${AVOTS_API_KEY}"
+
+  # Safety net: total context window (input + output). Normally auto-detected from
+  # the provider; pin it so a proxy that doesn't expose /v1/models can't mis-size
+  # compression. 200k is Claude Opus 4.x's window. Re-verify against avots if unsure.
+  context_length: 200000
+
+# Dangerous-command approval. Keep the default human-in-the-loop policy.
+# NOTE: when the agent's terminal/exec backend runs INSIDE a container, Hermes
+# SKIPS these checks (container == security boundary). On this VM the agent's
+# default local backend runs inside THIS container, so treat the VM/egress as the
+# real boundary regardless of this setting. See README "Security hardening".
+approvals:
+  mode: "manual"        # manual | smart | off  — never "off" on a client VM
+  timeout: 60
+  cron_mode: "deny"     # headless cron hitting a dangerous-command prompt -> block
+
+# Which messaging platforms this VM serves, and the tools each gets.
+# Telegram only by default (long-polling = outbound-only, no inbound TLS).
+platform_toolsets:
+  telegram: [hermes-telegram]
+
+# Auto-reset messaging sessions so context (and avots spend) doesn't grow forever.
+session_reset:
+  mode: both            # reset on idle timeout OR daily boundary
+  idle_minutes: 1440    # 24h
+  at_hour: 4            # 04:00 local
+# One session per user in any group/forum (secure default).
+group_sessions_per_user: true

@@ -1,0 +1,123 @@
+# Hermes Agent (Nous Research) for a single-tenant per-client VM.
+# The client gets a personal AI agent in their messaging apps (Telegram by default).
+# Backend LLM gateway: avots.ai (OpenAI-compatible). Each client uses their OWN avots key.
+# License: MIT. Brand this to the client as "powered by Hermes Agent (Nous Research)".
+#
+# Topology (outbound-only):
+#   gateway   -> talks OUT to Telegram (long-polling) and OUT to avots.ai. Publishes NOTHING.
+#                No inbound port, no TLS, no reverse proxy needed.
+#   dashboard -> OPTIONAL local admin UI on 127.0.0.1:9119 only (loopback). Off by default.
+#                It stores API keys; never expose it off-box. Reach it via SSH tunnel:
+#                  ssh -L 9119:localhost:9119 <vm>
+#
+# Upstream reference: github.com/NousResearch/hermes-agent  docker-compose.yml
+#   - Upstream uses `network_mode: host` + builds the image locally (`build: .`).
+#   - We instead pin the PUBLISHED image and use a private bridge with NO published
+#     ports, because Telegram long-polling is purely outbound. This is strictly more
+#     locked down than host networking. (If you switch to a messaging transport that
+#     needs an inbound webhook, that requires TLS + a reverse proxy — see README.)
+#
+# State: everything (config.yaml, .env, sessions, skills, memories) lives in the
+# mounted host data dir at ./data -> /opt/data inside the container. The image is
+# stateless; upgrade by bumping the pinned tag and re-pulling without losing state.
+#
+# Hardening: no-new-privileges, NO docker.sock mount, resource limits, read-only-ish.
+# IMPORTANT: inside container execution backends Hermes SKIPS dangerous-command
+# approval (the container is treated as the security boundary), so the VM and its
+# egress are the real boundary. Keep the box patched and egress-restricted. See README.
+
+x-restart: &restart unless-stopped
+
+services:
+  gateway:
+    # PIN — re-verify before baking the golden image.
+    # As of 2026-06-05 the newest patched release is v0.15.2 == tag v2026.5.29.2.
+    # Pinned by digest for immutability (the tag's multi-arch index digest):
+    #   nousresearch/hermes-agent:v2026.5.29.2
+    #   == sha256:2bba4ab37729ebdd864d4caf277b24fec4cd8bfc2855185fd9f4c90f9bf7bfa3
+    # Re-check Docker Hub + GitHub releases and re-bake when a newer patch ships
+    # (this project is pre-1.0 and ships CVEs/fixes frequently).
+    image: nousresearch/hermes-agent:v2026.5.29.2@sha256:2bba4ab37729ebdd864d4caf277b24fec4cd8bfc2855185fd9f4c90f9bf7bfa3
+    container_name: hermes
+    restart: *restart
+    # Private bridge, NOT host networking. No ports published => unreachable off-box.
+    networks:
+      - hermes
+    env_file: .env
+    environment:
+      # Map the in-container hermes user to the host owner of ./data so files written
+      # inside stay readable/writable on the host. 10000 matches the image default; if
+      # your VM's service user differs, set HERMES_UID/HERMES_GID in .env or here.
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      # Telegram gateway is configured via .env (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS).
+      # The avots key + base_url are wired through config.yaml (see below) which reads
+      # AVOTS_API_KEY / OPENAI_BASE_URL from this same env. (config.yaml lives in ./data.)
+      # The gateway sets HERMES_EXEC_ASK=1 itself; we do NOT enable YOLO mode.
+      #
+      # API server (OpenAI-compatible, port 8642) stays OFF. We only use chat platforms.
+      # Do NOT set API_SERVER_ENABLED / API_SERVER_HOST here. If you ever must, bind it
+      # to 127.0.0.1 and set API_SERVER_KEY, and publish nothing publicly.
+    volumes:
+      # Host data dir holds config.yaml + .env + sessions/skills/memories.
+      # We pre-seed config.yaml here at provision time (see config.yaml in this dir).
+      - ./data:/opt/data
+    command: ["gateway", "run"]
+    security_opt:
+      - no-new-privileges:true
+    # Drop all Linux capabilities; the agent doesn't need any to talk outbound.
+    cap_drop:
+      - ALL
+    # Sane resource limits for a $5–$20 VM. Tune per client plan.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3g
+    mem_swappiness: 0
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # OPTIONAL local admin dashboard. Disabled by default.
+  # To enable: set HERMES_DASHBOARD=1 in .env, then `docker compose up -d dashboard`.
+  # Upstream requires the dashboard to SHARE the gateway's PID namespace (its
+  # gateway-liveness probe needs it), so we attach to the gateway container's
+  # network + PID namespace rather than running it standalone.
+  dashboard:
+    image: nousresearch/hermes-agent:v2026.5.29.2@sha256:2bba4ab37729ebdd864d4caf277b24fec4cd8bfc2855185fd9f4c90f9bf7bfa3
+    container_name: hermes-dashboard
+    restart: *restart
+    profiles: ["dashboard"]   # only starts when explicitly requested
+    depends_on:
+      - gateway
+    # Share the gateway's net + PID namespaces (required for liveness detection).
+    network_mode: "service:gateway"
+    pid: "service:gateway"
+    env_file: .env
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+    volumes:
+      - ./data:/opt/data
+    # Loopback-only bind. 127.0.0.1 is NOT reachable off-box; reach via SSH tunnel.
+    command: ["dashboard", "--host", "127.0.0.1", "--no-open"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# No docker.sock is mounted anywhere on purpose: the agent can run arbitrary
+# commands/code, so the host Docker socket must never be reachable from the stack.
+
+networks:
+  hermes:
+    driver: bridge
