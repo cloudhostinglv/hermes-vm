@@ -128,6 +128,7 @@ services:
       PANEL_DOMAIN: "${PANEL_DOMAIN}"          # public host; firstboot derives it from IP if blank
       HERMES_DATA_DIR: "/data"                 # panel writes config.yaml/.env here (= gateway's /opt/data)
       AVOTS_API_KEY: "${AVOTS_API_KEY:-}"      # turnkey: if set, panel auto-connects avots on startup
+      HOME: "/data"                            # writable home for uid 10000 so OAuth client_id/token persist (/data/.config)
     volumes:
       # SAME host data dir the agent mounts (agent sees /opt/data, panel sees /data).
       # rw so the panel can write config.yaml + .env + .apply-request.
