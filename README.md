@@ -17,10 +17,15 @@ their **own provider key**, which they enter in a branded web setup panel.
   1. log in with **PANEL_PASSWORD**,
   2. pick a provider — **avots is recommended and pre-selected** — and paste their key
      (the panel validates it against the provider before saving),
-  3. optionally create a Telegram bot via **@BotFather** and paste the token following
-     the panel's in-page guide.
-  The panel writes `config.yaml` + `.env` into the shared data dir and triggers a
-  gateway restart so the agent immediately uses the new key.
+  3. create a Telegram bot via **@BotFather** and paste the **bot token** plus the
+     **allowed Telegram user ids** (comma-separated; get yours from **@userinfobot**),
+     following the panel's in-page guide.
+  The **panel is the single source of truth for all per-client agent secrets**
+  (provider, API key, Telegram bot token, Telegram allowed users). It writes
+  `config.yaml` + `.env` into the shared data dir (`./data`) and triggers a gateway
+  restart so the agent immediately uses the new settings. The Ubuntu autoinstall
+  injects **none** of these secrets — it sets only `PANEL_PASSWORD` (and derives the
+  domain).
 - It runs unattended on their VM (not their laptop) and can run scheduled automations.
 - Everything (config, sessions, skills, memories) lives on the VM in `./data`.
 
@@ -31,10 +36,10 @@ later; Telegram is the default because it is **outbound-only**.
 
 | File | Purpose |
 |---|---|
-| `docker-compose.yml` | `gateway` (Hermes, pinned+digest), `panel` (ai-panel), `caddy` (TLS), optional `dashboard`. Hardened, no docker.sock. |
+| `docker-compose.yml` | `gateway` (Hermes, pinned+digest), `panel` (ai-panel), `caddy` (TLS), optional `dashboard`. Hardened, no docker.sock. `gateway` has **no `env_file`** — its secrets come from the data dir, not the compose-level `.env`. |
 | `Caddyfile` | TLS terminator → `reverse_proxy panel:8080` for `${PANEL_DOMAIN}`, automatic Let's Encrypt. |
 | `config.yaml` | Hermes config wiring the provider (provider `custom`, base_url, model). Pre-seeded into `./data`; the panel rewrites it when the client saves a key. |
-| `.env.example` | Template for per-VM env (PANEL_PASSWORD, PANEL_DOMAIN, provider key, Telegram, uid/gid). |
+| `.env.example` | Template for the **compose-level** `.env` ONLY (PANEL_PASSWORD, PANEL_DOMAIN, HERMES_UID/GID, optional dashboard). Provider/Telegram secrets are **not** here — the panel writes those into `./data`. |
 | `firstboot.sh` | First-real-boot oneshot: data perms, derive domain, `compose pull/up`, install applier, self-disable. |
 | `hermes-firstboot.service` | systemd oneshot that runs `firstboot.sh` once. |
 | `autoinstall-snippet.yaml` | Ubuntu autoinstall drop-in: apt-install, clone, write `.env`, enable first-boot unit. |
@@ -64,35 +69,45 @@ The only other optional inbound service is the **local admin dashboard** (port 9
 Ubuntu autoinstall (late-commands, in-target):
   apt-install git/docker.io/docker-compose-v2/ca-certificates
   git clone -> /opt/hermes-vm
-  write /opt/hermes-vm/.env from placeholders (PANEL_DOMAIN blank = auto-derive)
+  write COMPOSE-LEVEL /opt/hermes-vm/.env: ONLY PANEL_PASSWORD (+ blank PANEL_DOMAIN,
+    HERMES_UID/GID). NO provider key, NO Telegram token/allowlist.
   enable hermes-firstboot.service
         |
         v  (first real boot, docker + network up)
 firstboot.sh:
-  chown ./data to HERMES_UID:GID; seed config.yaml; chmod 0600 .env
+  chown ./data to HERMES_UID:GID; seed config.yaml; chmod 0600 ./data/.env if present
   derive PANEL_DOMAIN from primary IPv4 if blank  ->  vps-<o3>-<o4>.cloudhosting.lv
   docker compose pull && up -d   (gateway + panel + caddy)
   install applier units + /etc/cloudhosting-panel.env; enable cloudhosting-applier.path
   disable itself
         |
-        v  (client uses the panel)
-panel (unprivileged) writes ./data/config.yaml + ./data/.env, touches ./data/.apply-request
+        v  (client opens the panel and enters provider/key + Telegram token/allowed ids)
+panel (unprivileged, SOURCE OF TRUTH for secrets) writes ./data/config.yaml +
+  ./data/.env (OPENAI_API_KEY, OPENAI_BASE_URL, TELEGRAM_BOT_TOKEN,
+  TELEGRAM_ALLOWED_USERS), touches ./data/.apply-request
         |
         v
 systemd cloudhosting-applier.path  ->  .service  ->  applier/apply.sh (on the HOST)
         |
         v
 docker compose -f /opt/hermes-vm/docker-compose.yml restart gateway
+  (gateway has no env_file; it re-reads ./data/config.yaml + ./data/.env at start)
 ```
 
 The panel container is **unprivileged and has no docker.sock**; only the host-side
 applier drives docker. Docker control stays off the web surface entirely.
 
-> **Reload behaviour — verify per release.** A `docker compose restart gateway` makes
-> the agent re-read `config.yaml` + `.env` on boot. Hermes is pre-1.0; confirm a plain
-> restart is sufficient (vs. `up -d` to re-evaluate `env_file`) against the pinned image
-> before baking the golden image. If `.env` changes need re-evaluation, switch the
-> applier to `up -d`.
+> **Reload behaviour — `restart`, not `up -d` (and why).** The `gateway` service has
+> **no `env_file`** and carries **no** provider/Telegram secrets in its compose
+> `environment:`. Every agent secret lives in the **data dir** (`/opt/data/config.yaml`
+> + `/opt/data/.env`, a bind mount) and Hermes loads it **itself at process start**. A
+> `docker compose restart gateway` restarts that process, so it re-reads the freshly
+> written data-dir files — there is **no compose-level env to re-evaluate**, so `up -d`
+> (which would recreate the container) is unnecessary. The applier therefore uses
+> `restart`. *Only* if you ever move a secret back into the compose
+> `environment:`/`env_file:` (don't — the panel is the source of truth) would you need
+> `up -d` so compose re-evaluates it. Hermes is pre-1.0: confirm `restart` picks up a
+> panel-changed `.env` against the pinned image before baking the golden image.
 
 ## uid / perms decision for `./data`
 
@@ -117,10 +132,12 @@ via the same `.env` variables.
 
 ## EXACT provider wiring
 
-Two places, both pointing at the same OpenAI-compatible gateway; the secret only ever
-lives in `.env`. avots is the default; the panel can rewrite these for OpenAI/Anthropic.
+Two places under the **data dir** (`./data` → `/opt/data`), both pointing at the same
+OpenAI-compatible gateway; the secret only ever lives in `./data/.env`. The **panel
+writes both** when the client saves a key (avots is the default; the panel can rewrite
+these for OpenAI/Anthropic). Neither is ever placed in the compose-level `/opt/hermes-vm/.env`.
 
-**`config.yaml` → `model:`** (non-secret settings; pre-seeded, panel-overwritten)
+**`./data/config.yaml` → `model:`** (non-secret settings; pre-seeded, panel-overwritten)
 
 ```yaml
 model:
@@ -131,12 +148,15 @@ model:
   context_length: 200000                      # safety net if /v1/models is silent
 ```
 
-**`.env`** (secret + env-var fallback path)
+**`./data/.env`** (secret + env-var fallback path; written by the panel, chmod 0600,
+owned by the agent uid — never committed, never in the compose-level `.env`)
 
 ```ini
-AVOTS_API_KEY=av_mcp_<key>
-OPENAI_API_KEY=av_mcp_<key>                    # same key; Hermes' custom-endpoint fallback
+OPENAI_API_KEY=av_mcp_<key>                    # the active ref used by config.yaml
 OPENAI_BASE_URL=https://api.avots.ai/openai/v1
+AVOTS_API_KEY=av_mcp_<key>                     # mirror; same key (harmless for non-avots)
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...           # from @BotFather (panel-written)
+TELEGRAM_ALLOWED_USERS=123456789,987654321     # comma-separated ids from @userinfobot
 ```
 
 Auth sent on the wire: `Authorization: Bearer av_mcp_<key>`. Validated 2026-06-05.
@@ -150,14 +170,18 @@ Field provenance (re-verify against upstream when bumping the pin):
 
 ```bash
 cd /opt/hermes-vm
-cp .env.example .env && edit .env       # set PANEL_PASSWORD; leave PANEL_DOMAIN blank to auto-derive
+cp .env.example .env && edit .env       # set PANEL_PASSWORD ONLY; leave PANEL_DOMAIN blank
+                                        # to auto-derive. Do NOT put provider/Telegram secrets here.
 ./firstboot.sh                          # data perms, derive domain, pull, up, install applier
-docker compose logs -f gateway          # watch it connect to Telegram + the provider
+docker compose logs -f gateway          # the agent is idle until the panel writes its config
 ```
 
 Then open `https://vps-<o3>-<o4>.cloudhosting.lv`, log in with PANEL_PASSWORD, pick a
-provider and paste the key. In production this is all done by `autoinstall-snippet.yaml`
-+ `firstboot.sh` on first boot; you do not run it by hand.
+provider and paste the key, and enter the Telegram bot token + allowed user ids. The
+panel writes `./data/config.yaml` + `./data/.env` and the applier restarts the agent —
+**the panel is the only place these secrets are entered**. In production this is all done
+by `autoinstall-snippet.yaml` + `firstboot.sh` on first boot (which sets only
+PANEL_PASSWORD); you do not run it by hand.
 
 ## Security hardening checklist
 

@@ -8,9 +8,9 @@
 #
 # Placeholders use the existing {placeholder} templating; the provisioner substitutes:
 #   {panel_password}      -> the panel login password (REQUIRED; the panel fails closed)
-#   {avots_key}           -> the client's avots key (av_mcp_...) OR BLANK (client sets in panel)
-#   {telegram_bot_token}  -> the client's Telegram bot token OR BLANK (client sets in panel)
-#   {telegram_allowed_users} -> comma-separated numeric Telegram user id(s) OR BLANK
+# NOTE: the provider/avots key, the Telegram bot token and allowed users are NOT injected
+# here. The client enters them in the panel, which writes them into the agent's data-dir
+# config and triggers the applier. Autoinstall only sets PANEL_PASSWORD (+ derives domain).
 # PANEL_DOMAIN is intentionally left blank so firstboot.sh auto-derives
 #   vps-<3rd octet>-<4th octet>.cloudhosting.lv from the VM's primary IPv4.
 #
@@ -42,11 +42,11 @@ autoinstall:
     # 2. Clone the appliance repo to /opt/hermes-vm (image tag is pinned inside docker-compose.yml).
     - ["curtin", "in-target", "--", "bash", "-c", "test -d /opt/hermes-vm || git clone --depth 1 https://github.com/cloudhostinglv/hermes-vm.git /opt/hermes-vm"]
 
-    # 3. Write the per-client .env from injected placeholders. avots/telegram MAY be
-    #    blank (the client sets them in the panel). PANEL_DOMAIN blank => auto-derive.
-    #    OPENAI_API_KEY mirrors the avots key (Hermes' custom-endpoint fallback path).
-    #    Single printf so YAML doesn't fold a multi-line body; \n separates the lines.
-    - ["curtin", "in-target", "--", "bash", "-c", "umask 077 && printf 'PANEL_PASSWORD=%s\\nPANEL_DOMAIN=\\nAVOTS_API_KEY=%s\\nOPENAI_API_KEY=%s\\nOPENAI_BASE_URL=https://api.avots.ai/openai/v1\\nTELEGRAM_BOT_TOKEN=%s\\nTELEGRAM_ALLOWED_USERS=%s\\nHERMES_UID=10000\\nHERMES_GID=10000\\n' '{panel_password}' '{avots_key}' '{avots_key}' '{telegram_bot_token}' '{telegram_allowed_users}' > /opt/hermes-vm/.env"]
+    # 3. Write the compose-level .env. ONLY the panel password + domain + uid/gid.
+    #    The provider key, Telegram bot token and allowed users are NOT here — the client
+    #    enters them in the panel, which writes them into the agent's data-dir config and
+    #    triggers the applier to restart the agent. PANEL_DOMAIN blank => derive from IP.
+    - ["curtin", "in-target", "--", "bash", "-c", "umask 077 && printf 'PANEL_PASSWORD=%s\\nPANEL_DOMAIN=\\nHERMES_UID=10000\\nHERMES_GID=10000\\n' '{panel_password}' > /opt/hermes-vm/.env"]
     - ["curtin", "in-target", "--", "chmod", "0600", "/opt/hermes-vm/.env"]
 
     # 4. Make firstboot.sh executable, install the shipped first-boot oneshot unit, enable it.

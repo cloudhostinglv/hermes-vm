@@ -66,16 +66,23 @@ services:
     # Private bridge, NOT host networking. No ports published => unreachable off-box.
     networks:
       - hermes
-    env_file: .env
+    # NO env_file here on purpose. The agent's SECRETS (provider key/base_url +
+    # Telegram bot token/allowed users) live in the DATA DIR, not the compose-level
+    # .env: Hermes loads /opt/data/.env (and expands ${VAR} in /opt/data/config.yaml)
+    # itself at startup. The CloudHosting panel is the single source of truth for
+    # those secrets — it writes ./data/config.yaml + ./data/.env and the host applier
+    # restarts this service. Injecting the compose-level .env here would create a
+    # second, conflicting source, so we deliberately omit env_file.
     environment:
       # Map the in-container hermes user to the host owner of ./data so files written
       # inside stay readable/writable on the host. 10000 matches the image default; if
-      # your VM's service user differs, set HERMES_UID/HERMES_GID in .env or here.
+      # your VM's service user differs, set HERMES_UID/HERMES_GID in the compose .env.
+      # These come from the compose-level .env via ${...} substitution (NOT secrets).
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
-      # Telegram gateway is configured via .env (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS).
-      # The provider key + base_url are wired through config.yaml (in ./data) which the
-      # panel writes. config.yaml references ${OPENAI_API_KEY}/${AVOTS_API_KEY} from .env.
+      # Telegram + provider config is NOT passed here: the agent reads it from the
+      # data dir (config.yaml + /opt/data/.env). config.yaml references
+      # ${OPENAI_API_KEY}/${AVOTS_API_KEY}, which Hermes resolves from /opt/data/.env.
       # The gateway sets HERMES_EXEC_ASK=1 itself; we do NOT enable YOLO mode.
       #
       # API server (OpenAI-compatible, port 8642) stays OFF. We only use chat platforms.
@@ -177,7 +184,8 @@ services:
     # Share the gateway's net + PID namespaces (required for liveness detection).
     network_mode: "service:gateway"
     pid: "service:gateway"
-    env_file: .env
+    # Same as gateway: NO env_file. Secrets live in the data dir (config.yaml +
+    # /opt/data/.env), which the dashboard reads directly. Keep the two in sync.
     environment:
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}

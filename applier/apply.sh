@@ -11,6 +11,19 @@
 #   docker compose -f /opt/hermes-vm/docker-compose.yml restart gateway
 # so the agent re-reads the config.yaml + .env the panel just wrote.
 #
+# RESTART vs UP -d (decision):
+#   The gateway service has NO `env_file:` and carries NO provider/Telegram
+#   secrets in its compose `environment:` block. All agent secrets live in the
+#   DATA DIR (/opt/data/config.yaml + /opt/data/.env, a bind mount), and Hermes
+#   loads them itself at PROCESS START. `docker compose restart` restarts the
+#   process in the existing container, so on the next start the agent re-reads
+#   the freshly-written data-dir files. There is no compose-level env to
+#   re-evaluate, so `up -d` (which would recreate the container) is unnecessary.
+#   => `restart` is the correct, lighter operation here.
+#   If you ever move a secret back into the compose `environment:`/`env_file:`
+#   (don't — the panel is the source of truth), switch this to `up -d gateway`
+#   so compose re-evaluates it. See README "Reload behaviour".
+#
 # Paths default to the Hermes layout but can be overridden via env or
 # /etc/cloudhosting-panel.env:
 #   PRODUCT             hermes (fixed for this VM)
