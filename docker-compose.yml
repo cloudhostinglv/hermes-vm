@@ -124,6 +124,7 @@ services:
     environment:
       PRODUCT: "hermes"
       PANEL_PASSWORD: "${PANEL_PASSWORD}"      # REQUIRED, the panel fails closed if empty
+      PANEL_REQUIRE_AUTH: "1"                  # enforce the above: empty password => refuse to start (fail closed)
       PANEL_PORT: "8080"
       PANEL_DOMAIN: "${PANEL_DOMAIN}"          # public host; firstboot derives it from IP if blank
       HERMES_DATA_DIR: "/data"                 # panel writes config.yaml/.env here (= gateway's /opt/data)
