@@ -110,4 +110,4 @@ log "Applier enabled (watching ${DATA_DIR}/.apply-request)"
 log "Disabling hermes-firstboot.service (provisioning complete)"
 systemctl disable hermes-firstboot.service 2>/dev/null || true
 
-log "First boot complete. Panel: https://${PANEL_DOMAIN}"
+log "First boot complete. Panel: https://${PANEL_DOMAIN}:8443"

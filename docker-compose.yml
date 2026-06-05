@@ -153,9 +153,9 @@ services:
     depends_on:
       - panel
     ports:
-      - "80:80"          # ACME HTTP-01 + redirect to HTTPS
-      - "443:443"        # panel (the only product surface for an agent)
-      - "443:443/udp"    # HTTP/3 (QUIC)
+      - "80:80"            # ACME HTTP-01 challenge (Let's Encrypt); panel itself is on 8443
+      - "8443:8443"        # the CloudHosting panel (ALWAYS on 8443, all products)
+      - "8443:8443/udp"    # HTTP/3 (QUIC) for the panel
     environment:
       PANEL_DOMAIN: "${PANEL_DOMAIN}"
     volumes:
