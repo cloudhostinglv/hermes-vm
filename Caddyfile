@@ -1,0 +1,50 @@
+# Caddyfile — TLS terminator for the Hermes per-client VM.
+#
+# Only ONE site: the CloudHosting setup panel. Hermes is a messaging AGENT, so there
+# is no product web UI to expose (the client uses Telegram + this panel). Caddy gets a
+# real Let's Encrypt cert via HTTP-01 because the A-record for ${PANEL_DOMAIN}
+# (vps-<o3>-<o4>.cloudhosting.lv) already exists.
+#
+# PANEL_DOMAIN is injected from the environment (compose passes it in). On first boot
+# firstboot.sh derives it from the primary IPv4 if it was left blank in .env.
+
+{
+	# ACME contact for Let's Encrypt expiry notices. Adjust if you prefer per-client.
+	email admin@cloudhosting.lv
+	# Uncomment to use the LE staging endpoint while testing (avoids rate limits):
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$PANEL_DOMAIN} {
+	encode zstd gzip
+
+	# Terminate TLS here and reverse-proxy plain HTTP to the panel container.
+	reverse_proxy panel:8080 {
+		# Generous timeouts: provider key validation in the panel makes an outbound
+		# /models call that can take a few seconds.
+		transport http {
+			dial_timeout 10s
+			response_header_timeout 30s
+		}
+	}
+
+	# Sane security headers for a login-gated admin surface.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		# Don't leak the server banner.
+		-Server
+	}
+
+	# Keep request bodies small; this panel only takes a key + a token.
+	request_body {
+		max_size 256KB
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

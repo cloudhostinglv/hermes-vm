@@ -1,44 +1,55 @@
-# cloud-init snippet — drop-in for the per-client autoinstall pipeline.
-# Brings up the pre-baked Hermes Agent stack on first boot for ONE client.
+# autoinstall-snippet.yaml — drop-in for the client's Ubuntu 24.04 autoinstall.
 #
-# Assumes the golden image already has: Docker + compose, and this directory's
-# docker-compose.yml + config.yaml present at /srv/avots-vm/hermes/ (image stateless,
-# tag pinned). This snippet only injects per-client secrets and starts the stack.
+# Brings up the pre-baked Hermes Agent stack (agent + setup panel + Caddy/TLS) for ONE
+# client on first boot. This snippet does NOT run docker in-target; it only prepares the
+# checkout, secrets, and a first-boot systemd oneshot. The actual `docker compose up` +
+# applier install happens in firstboot.sh on the first real boot (where networking +
+# the docker daemon are live).
 #
 # Placeholders use the existing {placeholder} templating; the provisioner substitutes:
-#   {avots_key}            -> the client's avots key (av_mcp_...)
-#   {telegram_bot_token}   -> the client's Telegram bot token (from @BotFather)
-#   {telegram_allowed_users} -> comma-separated numeric Telegram user id(s)
-#   {hermes_uid} {hermes_gid} -> host owner of the data dir (often 1000/1000)
+#   {panel_password}      -> the panel login password (REQUIRED; the panel fails closed)
+#   {avots_key}           -> the client's avots key (av_mcp_...) OR BLANK (client sets in panel)
+#   {telegram_bot_token}  -> the client's Telegram bot token OR BLANK (client sets in panel)
+#   {telegram_allowed_users} -> comma-separated numeric Telegram user id(s) OR BLANK
+# PANEL_DOMAIN is intentionally left blank so firstboot.sh auto-derives
+#   vps-<3rd octet>-<4th octet>.cloudhosting.lv from the VM's primary IPv4.
 #
-# Merge these keys into the VM's main cloud-config (do not ship as a standalone file
-# unless your pipeline concatenates write_files/runcmd blocks).
+# Merge these keys into the VM's main autoinstall user-data (curtin runs late-commands
+# in-target). If your pipeline keeps packages/late-commands in the autoinstall
+# `user-data:` block, concatenate accordingly.
+#
+# NOTE on quoting: each late-command is a single-line shell string (printf with \n) so
+# YAML never folds a multi-line heredoc body and corrupts the rendered .env / unit.
 
-write_files:
-  # Per-client secrets. Mounted into the container at /opt/data/.env.
-  # NOTE: cloud-init logs can include rendered write_files content on some setups;
-  # ensure /var/log/cloud-init-output.log is root-only on the golden image.
-  - path: /srv/avots-vm/hermes/data/.env
-    permissions: "0600"
-    owner: "{hermes_uid}:{hermes_gid}"
-    content: |
-      AVOTS_API_KEY={avots_key}
-      OPENAI_API_KEY={avots_key}
-      OPENAI_BASE_URL=https://api.avots.ai/openai/v1
-      TELEGRAM_BOT_TOKEN={telegram_bot_token}
-      TELEGRAM_ALLOWED_USERS={telegram_allowed_users}
-      HERMES_UID={hermes_uid}
-      HERMES_GID={hermes_gid}
+autoinstall:
+  version: 1
 
-runcmd:
-  # Ensure the mounted data dir exists and is owned by the mapped host user, so the
-  # container (remapped to HERMES_UID/GID) can read .env + write config.yaml/sessions.
-  - [ mkdir, -p, /srv/avots-vm/hermes/data ]
-  # config.yaml ships in the image dir; copy it into the data dir Hermes reads from.
-  - [ cp, -n, /srv/avots-vm/hermes/config.yaml, /srv/avots-vm/hermes/data/config.yaml ]
-  - [ chown, -R, "{hermes_uid}:{hermes_gid}", /srv/avots-vm/hermes/data ]
-  - [ chmod, "0600", /srv/avots-vm/hermes/data/.env ]
-  # Pull (in case the image isn't pre-baked) and start the stack outbound-only.
-  # Dashboard profile is intentionally NOT started (loopback admin UI stays off).
-  - [ docker, compose, -f, /srv/avots-vm/hermes/docker-compose.yml, pull ]
-  - [ docker, compose, -f, /srv/avots-vm/hermes/docker-compose.yml, up, -d ]
+  # Packages needed before first boot. docker.io + the compose v2 plugin + git + CA
+  # bundle. (Installed in-target; the daemon is started by firstboot, not here.)
+  packages:
+    - git
+    - docker.io
+    - docker-compose-v2
+    - ca-certificates
+
+  late-commands:
+    # All commands run inside the installed system via `curtin in-target`. NO docker
+    # here — the daemon/network aren't guaranteed during install. firstboot.sh does it.
+
+    # 1. Make sure the toolchain is present even if `packages:` above was overridden.
+    - ["curtin", "in-target", "--", "bash", "-c", "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git docker.io docker-compose-v2 ca-certificates"]
+
+    # 2. Clone the appliance repo to /opt/hermes-vm (image tag is pinned inside docker-compose.yml).
+    - ["curtin", "in-target", "--", "bash", "-c", "test -d /opt/hermes-vm || git clone --depth 1 https://github.com/cloudhostinglv/hermes-vm.git /opt/hermes-vm"]
+
+    # 3. Write the per-client .env from injected placeholders. avots/telegram MAY be
+    #    blank (the client sets them in the panel). PANEL_DOMAIN blank => auto-derive.
+    #    OPENAI_API_KEY mirrors the avots key (Hermes' custom-endpoint fallback path).
+    #    Single printf so YAML doesn't fold a multi-line body; \n separates the lines.
+    - ["curtin", "in-target", "--", "bash", "-c", "umask 077 && printf 'PANEL_PASSWORD=%s\\nPANEL_DOMAIN=\\nAVOTS_API_KEY=%s\\nOPENAI_API_KEY=%s\\nOPENAI_BASE_URL=https://api.avots.ai/openai/v1\\nTELEGRAM_BOT_TOKEN=%s\\nTELEGRAM_ALLOWED_USERS=%s\\nHERMES_UID=10000\\nHERMES_GID=10000\\n' '{panel_password}' '{avots_key}' '{avots_key}' '{telegram_bot_token}' '{telegram_allowed_users}' > /opt/hermes-vm/.env"]
+    - ["curtin", "in-target", "--", "chmod", "0600", "/opt/hermes-vm/.env"]
+
+    # 4. Make firstboot.sh executable, install the shipped first-boot oneshot unit, enable it.
+    - ["curtin", "in-target", "--", "chmod", "0755", "/opt/hermes-vm/firstboot.sh"]
+    - ["curtin", "in-target", "--", "cp", "/opt/hermes-vm/hermes-firstboot.service", "/etc/systemd/system/hermes-firstboot.service"]
+    - ["curtin", "in-target", "--", "systemctl", "enable", "hermes-firstboot.service"]

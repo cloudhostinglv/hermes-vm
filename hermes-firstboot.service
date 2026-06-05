@@ -1,0 +1,21 @@
+# First-boot provisioning oneshot for the Hermes per-client VM.
+# Installed + enabled by autoinstall-snippet.yaml (late-commands). Runs firstboot.sh
+# ONCE after docker + networking are up, which pulls + starts the stack, derives
+# PANEL_DOMAIN if blank, installs the host applier, then disables itself.
+#
+# It is safe if it lingers enabled: firstboot.sh is idempotent and disables this unit
+# at the end, so a re-enable + reboot would just re-converge.
+
+[Unit]
+Description=Hermes VM first-boot provisioning (panel + TLS + agent)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+ConditionPathExists=/opt/hermes-vm/firstboot.sh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/hermes-vm/firstboot.sh
+
+[Install]
+WantedBy=multi-user.target

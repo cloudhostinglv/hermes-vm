@@ -1,32 +1,55 @@
 # Hermes Agent (Nous Research) for a single-tenant per-client VM.
-# The client gets a personal AI agent in their messaging apps (Telegram by default).
-# Backend LLM gateway: avots.ai (OpenAI-compatible). Each client uses their OWN avots key.
-# License: MIT. Brand this to the client as "powered by Hermes Agent (Nous Research)".
+# The client gets a personal AI agent in their messaging apps (Telegram by default)
+# PLUS a branded CloudHosting setup panel they use to pick an LLM provider and paste
+# their key. One VM = one client.
 #
-# Topology (outbound-only):
-#   gateway   -> talks OUT to Telegram (long-polling) and OUT to avots.ai. Publishes NOTHING.
-#                No inbound port, no TLS, no reverse proxy needed.
-#   dashboard -> OPTIONAL local admin UI on 127.0.0.1:9119 only (loopback). Off by default.
-#                It stores API keys; never expose it off-box. Reach it via SSH tunnel:
-#                  ssh -L 9119:localhost:9119 <vm>
+# Topology:
+#   gateway  -> the Hermes AGENT. Talks OUT to Telegram (long-polling) and OUT to the
+#               LLM provider (avots by default; OpenAI/Anthropic optional via panel).
+#               Publishes NOTHING; sits on the private `hermes` bridge. No product UI.
+#   panel    -> the CloudHosting onboarding/setup web panel (ghcr.io/cloudhostinglv/
+#               ai-panel). Unprivileged. Mounts the SAME ./data the agent uses (rw) so
+#               it writes config.yaml + .env that the agent reads, then touches
+#               ./data/.apply-request to ask the HOST applier to restart `gateway`.
+#               Serves plain HTTP on :8080 on the internal `web` network only.
+#   caddy    -> terminates TLS on 80 + 443 for ${PANEL_DOMAIN} (Let's Encrypt, HTTP-01)
+#               and reverse-proxies :443 -> panel:8080. This is the ONLY inbound
+#               surface. (Hermes is an AGENT, so there is NO product UI port — only
+#               :443 = the panel. No :8443.)
+#   dashboard-> OPTIONAL local admin UI on 127.0.0.1:9119 only (loopback). Off by default.
+#               It stores API keys; never expose it off-box. Reach it via SSH tunnel:
+#                 ssh -L 9119:localhost:9119 <vm>
 #
-# Upstream reference: github.com/NousResearch/hermes-agent  docker-compose.yml
-#   - Upstream uses `network_mode: host` + builds the image locally (`build: .`).
-#   - We instead pin the PUBLISHED image and use a private bridge with NO published
-#     ports, because Telegram long-polling is purely outbound. This is strictly more
-#     locked down than host networking. (If you switch to a messaging transport that
-#     needs an inbound webhook, that requires TLS + a reverse proxy — see README.)
+# NETWORK MODEL CHANGE: earlier revisions of this stack were strictly outbound-only.
+# Adding the setup panel means the VM now accepts INBOUND 80 + 443 (panel + ACME).
+# The agent (`gateway`) still publishes nothing and stays on its own private bridge;
+# only Caddy is internet-facing. See README "Network model".
+#
+# UID / PERMS DECISION (shared ./data):
+#   The panel image runs as uid 10001 by default and chmods the .env it writes to 0600
+#   (owner-only). Hermes runs as HERMES_UID:HERMES_GID (default 10000:10000). To let the
+#   agent read a 0600 .env the panel wrote, we run the PANEL AS THE AGENT'S uid:gid
+#   (user: "${HERMES_UID:-10000}:${HERMES_GID:-10000}"). Then both processes are the
+#   same uid, ./data is owned by that uid (firstboot chowns it), and the 0600 secret
+#   stays owner-only (best for a key) while remaining readable by the agent. No group
+#   gymnastics, no world-readable secret. firstboot.sh enforces the ownership/mode.
 #
 # State: everything (config.yaml, .env, sessions, skills, memories) lives in the
-# mounted host data dir at ./data -> /opt/data inside the container. The image is
-# stateless; upgrade by bumping the pinned tag and re-pulling without losing state.
+# mounted host data dir ./data -> /opt/data (agent) / /data (panel). The images are
+# stateless; upgrade by bumping a pinned tag and re-pulling without losing state.
 #
-# Hardening: no-new-privileges, NO docker.sock mount, resource limits, read-only-ish.
-# IMPORTANT: inside container execution backends Hermes SKIPS dangerous-command
-# approval (the container is treated as the security boundary), so the VM and its
-# egress are the real boundary. Keep the box patched and egress-restricted. See README.
+# Hardening: no-new-privileges everywhere, NO docker.sock mount anywhere, resource
+# limits, cap_drop. IMPORTANT: inside-container execution backends make Hermes SKIP
+# dangerous-command approval (the container is treated as the security boundary), so
+# the VM and its egress are the real boundary. Keep the box patched + egress-restricted.
 
 x-restart: &restart unless-stopped
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   gateway:
@@ -51,8 +74,8 @@ services:
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
       # Telegram gateway is configured via .env (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS).
-      # The avots key + base_url are wired through config.yaml (see below) which reads
-      # AVOTS_API_KEY / OPENAI_BASE_URL from this same env. (config.yaml lives in ./data.)
+      # The provider key + base_url are wired through config.yaml (in ./data) which the
+      # panel writes. config.yaml references ${OPENAI_API_KEY}/${AVOTS_API_KEY} from .env.
       # The gateway sets HERMES_EXEC_ASK=1 itself; we do NOT enable YOLO mode.
       #
       # API server (OpenAI-compatible, port 8642) stays OFF. We only use chat platforms.
@@ -60,7 +83,7 @@ services:
       # to 127.0.0.1 and set API_SERVER_KEY, and publish nothing publicly.
     volumes:
       # Host data dir holds config.yaml + .env + sessions/skills/memories.
-      # We pre-seed config.yaml here at provision time (see config.yaml in this dir).
+      # The panel (below) writes config.yaml + .env into this SAME dir.
       - ./data:/opt/data
     command: ["gateway", "run"]
     security_opt:
@@ -68,7 +91,7 @@ services:
     # Drop all Linux capabilities; the agent doesn't need any to talk outbound.
     cap_drop:
       - ALL
-    # Sane resource limits for a $5–$20 VM. Tune per client plan.
+    # Sane resource limits for a $5-$20 VM. Tune per client plan.
     deploy:
       resources:
         limits:
@@ -76,11 +99,68 @@ services:
           memory: 3g
     mem_swappiness: 0
     pids_limit: 512
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *logging
+
+  # CloudHosting unified setup panel (PUBLIC image). The client logs in with
+  # PANEL_PASSWORD, picks a provider (avots recommended/default), pastes their key,
+  # and optionally wires the Telegram bot. The panel writes config.yaml + .env into
+  # the SHARED ./data and touches ./data/.apply-request; the HOST applier then
+  # restarts `gateway`. Unprivileged, no docker.sock.
+  panel:
+    image: ghcr.io/cloudhostinglv/ai-panel:latest
+    container_name: hermes-panel
+    restart: *restart
+    # Run as the AGENT's uid:gid so the 0600 .env the panel writes is owned by — and
+    # therefore readable by — the Hermes agent. See "UID / PERMS DECISION" up top.
+    user: "${HERMES_UID:-10000}:${HERMES_GID:-10000}"
+    depends_on:
+      - gateway
+    environment:
+      PRODUCT: "hermes"
+      PANEL_PASSWORD: "${PANEL_PASSWORD}"      # REQUIRED — the panel fails closed if empty
+      PANEL_PORT: "8080"
+      PANEL_DOMAIN: "${PANEL_DOMAIN}"          # public host; firstboot derives it from IP if blank
+    volumes:
+      # SAME host data dir the agent mounts (agent sees /opt/data, panel sees /data).
+      # rw so the panel can write config.yaml + .env + .apply-request.
+      - ./data:/data
+    # Reachable only on the internal `web` network as panel:8080; Caddy fronts it.
+    # NOT published on 0.0.0.0.
+    expose:
+      - "8080"
+    networks:
+      - web
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # NO docker.sock mount — by design. The host applier holds docker access.
+    logging: *logging
+
+  # TLS terminator + reverse proxy. The ONLY internet-facing service. Gets a real
+  # Let's Encrypt cert via HTTP-01 for ${PANEL_DOMAIN} (the A-record already exists by
+  # the vps-<o3>-<o4>.cloudhosting.lv convention, so no DNS step is needed).
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: hermes-caddy
+    restart: *restart
+    depends_on:
+      - panel
+    ports:
+      - "80:80"          # ACME HTTP-01 + redirect to HTTPS
+      - "443:443"        # panel (the only product surface for an agent)
+      - "443:443/udp"    # HTTP/3 (QUIC)
+    environment:
+      PANEL_DOMAIN: "${PANEL_DOMAIN}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # LE certs + account (persisted)
+      - caddy_config:/config   # Caddy autosave state
+    networks:
+      - web
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
 
   # OPTIONAL local admin dashboard. Disabled by default.
   # To enable: set HERMES_DASHBOARD=1 in .env, then `docker compose up -d dashboard`.
@@ -109,15 +189,20 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *logging
 
 # No docker.sock is mounted anywhere on purpose: the agent can run arbitrary
 # commands/code, so the host Docker socket must never be reachable from the stack.
+# Docker control lives ONLY in the host-side systemd applier (see applier/).
 
 networks:
+  # Agent's private bridge — no published ports, no panel/caddy on it.
   hermes:
     driver: bridge
+  # Panel <-> Caddy only.
+  web:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
