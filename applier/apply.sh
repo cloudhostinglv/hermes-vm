@@ -59,6 +59,35 @@ docker compose version >/dev/null 2>&1 || die "docker compose v2 required."
 
 PROJECT_DIR="${COMPOSE_PROJECT_DIR:-$(dirname "${COMPOSE_FILE}")}"
 
+# --- pairing approve/revoke (if the panel queued one) ----------------------
+# The panel (unprivileged) can't exec the gateway CLI, so to approve a user who
+# messaged the bot it drops a tiny KEY=VALUE request file and touches
+# .apply-request (which fired this run). If that file is present, run the
+# gateway's native pairing CLI instead of a plain restart. Inputs are validated
+# here (defense in depth) before being passed to the CLI.
+PAIRING_REQ="${DATA_DIR}/.pairing-request"
+if [ -f "${PAIRING_REQ}" ]; then
+  P_ACTION="$(sed -n 's/^action=\(.*\)$/\1/p'   "${PAIRING_REQ}" | head -n1)"
+  P_PLATFORM="$(sed -n 's/^platform=\(.*\)$/\1/p' "${PAIRING_REQ}" | head -n1)"
+  P_CODE="$(sed -n 's/^code=\(.*\)$/\1/p'        "${PAIRING_REQ}" | head -n1)"
+  rm -f "${PAIRING_REQ}"
+  case "${P_ACTION}" in
+    approve|revoke) : ;;
+    *) die "invalid pairing action: '${P_ACTION}'" ;;
+  esac
+  printf '%s' "${P_PLATFORM}" | grep -Eq '^[a-z_]{2,20}$'   || die "invalid pairing platform: '${P_PLATFORM}'"
+  printf '%s' "${P_CODE}"     | grep -Eq '^[a-f0-9]{6,64}$' || die "invalid pairing code"
+  log "Pairing: hermes pairing ${P_ACTION} ${P_PLATFORM} <code>"
+  docker compose --project-directory "${PROJECT_DIR}" -f "${COMPOSE_FILE}" \
+    exec -T "${SERVICE}" hermes pairing "${P_ACTION}" "${P_PLATFORM}" "${P_CODE}" 2>&1 \
+    | sed 's/^/[pairing] /' || log "WARN: pairing CLI exited non-zero"
+  # Restart so the running agent re-reads the approval store on next start.
+  log "Pairing processed; restarting '${SERVICE}'."
+  docker compose --project-directory "${PROJECT_DIR}" -f "${COMPOSE_FILE}" restart "${SERVICE}"
+  log "Done (pairing)."
+  exit 0
+fi
+
 # Sanity: confirm the config artifact the panel writes is present before bouncing.
 CFG="${DATA_DIR}/config.yaml"
 if [ ! -f "${CFG}" ]; then
