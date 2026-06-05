@@ -46,7 +46,7 @@ autoinstall:
     #    The provider key, Telegram bot token and allowed users are NOT here — the client
     #    enters them in the panel, which writes them into the agent's data-dir config and
     #    triggers the applier to restart the agent. PANEL_DOMAIN blank => derive from IP.
-    - ["curtin", "in-target", "--", "bash", "-c", "umask 077 && printf 'PANEL_PASSWORD=%s\\nPANEL_DOMAIN=\\nHERMES_UID=10000\\nHERMES_GID=10000\\n' '{panel_password}' > /opt/hermes-vm/.env"]
+    - ["curtin", "in-target", "--", "bash", "-c", "umask 077 && printf 'PANEL_PASSWORD=%s\\nPANEL_DOMAIN=\\n' '{panel_password}' > /opt/hermes-vm/.env"]
     - ["curtin", "in-target", "--", "chmod", "0600", "/opt/hermes-vm/.env"]
 
     # 4. Make firstboot.sh executable, install the shipped first-boot oneshot unit, enable it.

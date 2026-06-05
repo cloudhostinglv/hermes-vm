@@ -27,12 +27,12 @@
 #
 # UID / PERMS DECISION (shared ./data):
 #   The panel image runs as uid 10001 by default and chmods the .env it writes to 0600
-#   (owner-only). Hermes runs as HERMES_UID:HERMES_GID (default 10000:10000). To let the
-#   agent read a 0600 .env the panel wrote, we run the PANEL AS THE AGENT'S uid:gid
-#   (user: "${HERMES_UID:-10000}:${HERMES_GID:-10000}"). Then both processes are the
-#   same uid, ./data is owned by that uid (firstboot chowns it), and the 0600 secret
-#   stays owner-only (best for a key) while remaining readable by the agent. No group
-#   gymnastics, no world-readable secret. firstboot.sh enforces the ownership/mode.
+#   (owner-only). Hermes runs as uid 10000 (the image default). To let the agent read a
+#   0600 .env the panel wrote, we run the PANEL AS uid 10000 too (user: "10000:10000").
+#   Then both processes are the same uid, ./data is owned by 10000 (firstboot chowns it),
+#   and the 0600 secret stays owner-only (best for a key) while remaining readable by the
+#   agent. No group gymnastics, no world-readable secret, no .env knob. firstboot.sh
+#   enforces the ownership/mode. (If a future image changes its uid, update it here.)
 #
 # State: everything (config.yaml, .env, sessions, skills, memories) lives in the
 # mounted host data dir ./data -> /opt/data (agent) / /data (panel). The images are
@@ -75,11 +75,10 @@ services:
     # second, conflicting source, so we deliberately omit env_file.
     environment:
       # Map the in-container hermes user to the host owner of ./data so files written
-      # inside stay readable/writable on the host. 10000 matches the image default; if
-      # your VM's service user differs, set HERMES_UID/HERMES_GID in the compose .env.
-      # These come from the compose-level .env via ${...} substitution (NOT secrets).
-      - HERMES_UID=${HERMES_UID:-10000}
-      - HERMES_GID=${HERMES_GID:-10000}
+      # inside stay readable/writable on the host. Hardcoded to 10000 (the image
+      # default); no .env knob. If a future image changes its uid, bump it here.
+      - HERMES_UID=10000
+      - HERMES_GID=10000
       # Telegram + provider config is NOT passed here: the agent reads it from the
       # data dir (config.yaml + /opt/data/.env). config.yaml references
       # ${OPENAI_API_KEY}/${AVOTS_API_KEY}, which Hermes resolves from /opt/data/.env.
@@ -117,9 +116,9 @@ services:
     image: ghcr.io/cloudhostinglv/ai-panel:latest
     container_name: hermes-panel
     restart: *restart
-    # Run as the AGENT's uid:gid so the 0600 .env the panel writes is owned by — and
-    # therefore readable by — the Hermes agent. See "UID / PERMS DECISION" up top.
-    user: "${HERMES_UID:-10000}:${HERMES_GID:-10000}"
+    # Run as the agent's uid (10000) so the 0600 .env the panel writes is owned by, and
+    # therefore readable by, the Hermes agent. See "UID / PERMS DECISION" up top.
+    user: "10000:10000"
     depends_on:
       - gateway
     environment:
@@ -187,8 +186,8 @@ services:
     # Same as gateway: NO env_file. Secrets live in the data dir (config.yaml +
     # /opt/data/.env), which the dashboard reads directly. Keep the two in sync.
     environment:
-      - HERMES_UID=${HERMES_UID:-10000}
-      - HERMES_GID=${HERMES_GID:-10000}
+      - HERMES_UID=10000
+      - HERMES_GID=10000
     volumes:
       - ./data:/opt/data
     # Loopback-only bind. 127.0.0.1 is NOT reachable off-box; reach via SSH tunnel.
