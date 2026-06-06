@@ -198,7 +198,8 @@ services:
   # gateway-liveness probe needs it), so we attach to the gateway container's
   # network + PID namespace rather than running it standalone.
   dashboard:
-    image: nousresearch/hermes-agent:v2026.5.29.2@sha256:2bba4ab37729ebdd864d4caf277b24fec4cd8bfc2855185fd9f4c90f9bf7bfa3
+    # Same pin as the gateway (keep both services on one verified version).
+    image: nousresearch/hermes-agent:v2026.6.5@sha256:9ad3b04ec916ea2c2da22358fd43b024c788d74073210695af88bfc2e63869b4
     container_name: hermes-dashboard
     restart: *restart
     profiles: ["dashboard"]   # only starts when explicitly requested
