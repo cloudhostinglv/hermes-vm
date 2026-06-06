@@ -53,14 +53,17 @@ x-logging: &logging
 
 services:
   gateway:
-    # PIN — re-verify before baking the golden image.
-    # As of 2026-06-05 the newest patched release is v0.15.2 == tag v2026.5.29.2.
+    # PIN — re-verify (doctor + live tool call) before baking the golden image.
+    # As of 2026-06-06 the newest patched stable is tag v2026.6.5 (Docker Hub).
+    # Verified live on vps-60-156 2026-06-06: gateway healthy, bot replies with
+    # real content via avots (plain chat OK; no empty/blocked regressions).
     # Pinned by digest for immutability (the tag's multi-arch index digest):
-    #   nousresearch/hermes-agent:v2026.5.29.2
-    #   == sha256:2bba4ab37729ebdd864d4caf277b24fec4cd8bfc2855185fd9f4c90f9bf7bfa3
+    #   nousresearch/hermes-agent:v2026.6.5
+    #   == sha256:9ad3b04ec916ea2c2da22358fd43b024c788d74073210695af88bfc2e63869b4
+    # Prev pin was v2026.5.29.2 (== sha256:2bba4ab3…f7bfa3).
     # Re-check Docker Hub + GitHub releases and re-bake when a newer patch ships
     # (this project is pre-1.0 and ships CVEs/fixes frequently).
-    image: nousresearch/hermes-agent:v2026.5.29.2@sha256:2bba4ab37729ebdd864d4caf277b24fec4cd8bfc2855185fd9f4c90f9bf7bfa3
+    image: nousresearch/hermes-agent:v2026.6.5@sha256:9ad3b04ec916ea2c2da22358fd43b024c788d74073210695af88bfc2e63869b4
     container_name: hermes
     restart: *restart
     # Private bridge, NOT host networking. No ports published => unreachable off-box.
