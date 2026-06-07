@@ -85,26 +85,35 @@ docker compose -f "${COMPOSE_FILE}" pull
 log "docker compose up -d"
 docker compose -f "${COMPOSE_FILE}" up -d
 
-# --- 5. Install the host-side applier (docker control stays off the web surface) ----
-log "Installing applier units"
+# --- 5. Install the host-side applier + software updater (docker stays off the web) --
+log "Installing applier + updater units"
 install -d -m 0755 "${APPLIER_LIB}"
-install -m 0755 "${APPLIER_SRC}/apply.sh" "${APPLIER_LIB}/apply.sh"
+install -m 0755 "${APPLIER_SRC}/apply.sh"  "${APPLIER_LIB}/apply.sh"
+install -m 0755 "${APPLIER_SRC}/update.sh" "${APPLIER_LIB}/update.sh"
 cp "${APPLIER_SRC}/cloudhosting-applier.path"    /etc/systemd/system/
 cp "${APPLIER_SRC}/cloudhosting-applier.service" /etc/systemd/system/
+cp "${APPLIER_SRC}/cloudhosting-updater.path"    /etc/systemd/system/
+cp "${APPLIER_SRC}/cloudhosting-updater.service" /etc/systemd/system/
 
-# Per-VM applier config: which product + compose file + data dir to act on. apply.sh
-# maps hermes -> restart the `gateway` service. The .path unit watches .apply-request.
+# Per-VM applier/updater config: which product + compose + repo + data dir to act on.
+# apply.sh maps hermes -> restart the `gateway` service (.apply-request); update.sh
+# git-pulls REPO_DIR + docker compose pull/up (.update-request).
 cat > "${PANEL_ENV}" <<EOF
 PRODUCT=hermes
 COMPOSE_FILE=${COMPOSE_FILE}
 COMPOSE_PROJECT_DIR=${APP_DIR}
+REPO_DIR=${APP_DIR}
 DATA_DIR=${DATA_DIR}
+UPDATE_BRANCH=main
 EOF
 chmod 0644 "${PANEL_ENV}"
 
 systemctl daemon-reload
 systemctl enable --now cloudhosting-applier.path
-log "Applier enabled (watching ${DATA_DIR}/.apply-request)"
+systemctl enable --now cloudhosting-updater.path
+log "Applier watching ${DATA_DIR}/.apply-request; updater watching ${DATA_DIR}/.update-request"
+# Record the deployed version so the panel shows current -> latest right away.
+"${APPLIER_LIB}/update.sh" --stamp-only || log "WARN: initial version stamp failed"
 
 # --- 6. Disable this oneshot so it never runs again ---------------------------------
 log "Disabling hermes-firstboot.service (provisioning complete)"
